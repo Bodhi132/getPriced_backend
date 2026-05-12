@@ -11,4 +11,18 @@ const apiLimiter = rateLimit({
   },
 });
 
-module.exports = apiLimiter;
+const leadLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5, // limit each IP to 5 lead submissions per hour
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many lead submissions from this IP, please try again after an hour',
+  },
+});
+
+module.exports = {
+  apiLimiter,
+  leadLimiter
+};

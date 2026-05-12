@@ -47,6 +47,9 @@ const evaluateStack = (tools) => {
 
         breakdown.push({
           tool_name: tool.name,
+          plan: tool.plan,
+          users_count: users,
+          use_case: tool.useCase,
           current_estimated_monthly_spend: currentSpend,
           recommended_action: optimization.recommendedAction,
           estimated_monthly_savings: verifiedSavings,
@@ -61,6 +64,9 @@ const evaluateStack = (tools) => {
     // Default fallback if no rules apply or trigger
     breakdown.push({
       tool_name: tool.name,
+      plan: tool.plan,
+      users_count: users,
+      use_case: tool.useCase,
       current_estimated_monthly_spend: currentSpend,
       recommended_action: "Maintain current plan",
       estimated_monthly_savings: 0,

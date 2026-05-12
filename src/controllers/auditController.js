@@ -1,9 +1,40 @@
 const Groq = require('groq-sdk');
 const { evaluateStack } = require('../engine/evaluator');
+const { getPool } = require('../config/db');
 
 const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY,
 });
+
+/**
+ * Ensures audit tables exist
+ */
+const createAuditTables = async () => {
+  const pool = getPool();
+  if (!pool) return;
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audits (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email TEXT,
+        total_monthly_spend NUMERIC DEFAULT 0,
+        total_monthly_savings NUMERIC DEFAULT 0,
+        strategic_summary TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS audit_tools (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        audit_id UUID NOT NULL REFERENCES audits(id) ON DELETE CASCADE,
+        tool_name TEXT NOT NULL,
+        plan TEXT NOT NULL,
+        users_count INTEGER NOT NULL DEFAULT 1,
+        use_case TEXT NOT NULL,
+        estimated_monthly_savings NUMERIC DEFAULT 0,
+        recommended_action TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+    );
+  `);
+};
 
 /**
  * Controller for SaaS Subscription Audit
@@ -11,7 +42,7 @@ const groq = new Groq({
 const runAudit = async (req, res, next) => {
   try {
     const { email, tools } = req.body;
-    const supabase = req.supabase;
+    const pool = getPool();
 
     if (!tools || !Array.isArray(tools) || tools.length === 0) {
       return res.status(400).json({ 
@@ -20,42 +51,10 @@ const runAudit = async (req, res, next) => {
       });
     }
 
-    // 1. Save to Supabase (if database is configured)
-    let auditId = null;
-    if (supabase && email) {
-      try {
-        const { data: audit, error: auditError } = await supabase
-          .from('audits')
-          .insert([{ email }])
-          .select()
-          .single();
-
-        if (auditError) console.error('Supabase Audit Error:', auditError);
-        else {
-          auditId = audit.id;
-          const toolRecords = tools.map((tool) => ({
-            audit_id: auditId,
-            tool_name: tool.name,
-            plan: tool.plan,
-            users_count: parseInt(tool.usersCount) || 1,
-            use_case: tool.useCase
-          }));
-
-          const { error: toolsError } = await supabase
-            .from('audit_tools')
-            .insert(toolRecords);
-
-          if (toolsError) console.error('Supabase Tools Error:', toolsError);
-        }
-      } catch (dbError) {
-        console.error('Database connection error:', dbError);
-      }
-    }
-
-    // 2. Hardcoded Evaluation
+    // 1. Hardcoded Evaluation
     const calculatedResults = evaluateStack(tools);
 
-    // 3. Extract top context for the LLM
+    // 2. Extract context for the LLM
     const topFlags = [...calculatedResults.per_tool_breakdown]
       .filter(t => t.estimated_monthly_savings > 0)
       .sort((a, b) => b.estimated_monthly_savings - a.estimated_monthly_savings)
@@ -68,31 +67,65 @@ const runAudit = async (req, res, next) => {
       top_flagged_tools: topFlags
     };
 
-    // 4. Call Groq API for Personalized Executive Summary
+    // 3. Call Groq API for Personalized Executive Summary
     const systemPrompt = `You are a sharp, modern fractional CFO advising a startup founder.
-Your goal is to provide a highly personalized, analytical, yet encouraging executive summary of their SaaS spend audit.
+Your goal is to provide a highly personalized summary of their SaaS spend audit.
 Rules:
 - Generate a single paragraph (maximum 100 words).
-- Highlight the biggest area of waste from the provided data.
-- Validate the overall state of their stack.
-- Tone: Professional, direct, numbers-driven.
-- Output ONLY the paragraph text. Do NOT use markdown formatting, pleasantries, or JSON wrapping.`;
+- Highlight the biggest area of waste.
+- Output ONLY the paragraph text.`;
 
-    const userPrompt = `Here are the results of the SaaS audit:
-${JSON.stringify(llmContext, null, 2)}
+    const userPrompt = `Audit results: ${JSON.stringify(llmContext, null, 2)}`;
 
-Provide the executive summary paragraph.`;
-
-    const chatCompletion = await groq.chat.completions.create({
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      model: 'openai/gpt-oss-120b',
-    });
-
-    const executiveSummary = chatCompletion.choices[0].message.content.trim();
+    let executiveSummary = "Our analysis identifies significant optimization opportunities in your current SaaS stack.";
+    try {
+      const chatCompletion = await groq.chat.completions.create({
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        model: 'openai/gpt-oss-120b',
+      });
+      executiveSummary = chatCompletion.choices[0].message.content.trim();
+    } catch (llmErr) {
+      console.error('Groq Error:', llmErr);
+    }
+    
     calculatedResults.strategic_summary = executiveSummary;
+
+    // 4. Persistence (using pg)
+    let auditId = null;
+    if (pool) {
+      try {
+        await createAuditTables();
+
+        const auditInsert = await pool.query(`
+          INSERT INTO audits (email, total_monthly_spend, total_monthly_savings, strategic_summary)
+          VALUES ($1, $2, $3, $4)
+          RETURNING id;
+        `, [email, calculatedResults.total_current_monthly_spend, calculatedResults.total_monthly_savings, executiveSummary]);
+
+        auditId = auditInsert.rows[0].id;
+
+        for (const tool of calculatedResults.per_tool_breakdown) {
+          await pool.query(`
+            INSERT INTO audit_tools (audit_id, tool_name, plan, users_count, use_case, estimated_monthly_savings, recommended_action)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `, [
+            auditId, 
+            tool.tool_name, 
+            tool.plan, 
+            tool.users_count, 
+            tool.use_case, 
+            tool.estimated_monthly_savings, 
+            tool.recommended_action
+          ]);
+        }
+        console.log('Audit saved with ID:', auditId);
+      } catch (dbErr) {
+        console.error('Audit Persistence Error:', dbErr);
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -105,7 +138,54 @@ Provide the executive summary paragraph.`;
   }
 };
 
+/**
+ * Fetch Public Audit (Masked)
+ */
+const getPublicAudit = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const pool = getPool();
+
+    // Validate ID
+    if (!id || id === 'undefined' || id.length < 32) {
+      return res.status(400).json({ success: false, message: 'Invalid or missing Audit ID' });
+    }
+
+    if (!pool) {
+      return res.status(500).json({ success: false, message: 'Database connection failed' });
+    }
+
+    const auditResult = await pool.query(`
+      SELECT id, total_monthly_spend, total_monthly_savings, strategic_summary, created_at 
+      FROM audits 
+      WHERE id = $1
+    `, [id]);
+
+    if (auditResult.rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Audit not found' });
+    }
+
+    const toolsResult = await pool.query(`
+      SELECT tool_name, plan, users_count, use_case, estimated_monthly_savings, recommended_action
+      FROM audit_tools
+      WHERE audit_id = $1
+    `, [id]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        ...auditResult.rows[0],
+        per_tool_breakdown: toolsResult.rows
+      }
+    });
+  } catch (error) {
+    console.error('Fetch Public Audit Error:', error);
+    next(error);
+  }
+};
+
 module.exports = {
   runAudit,
+  getPublicAudit
 };
 

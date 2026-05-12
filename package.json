@@ -2,7 +2,6 @@
   "name": "backend",
   "version": "1.0.0",
   "main": "server.js",
-
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon server.js"
@@ -17,6 +16,9 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.1",
-    "groq-sdk": "^1.1.2"
+    "groq-sdk": "^1.1.2",
+    "pg": "^8.20.0",
+    "resend": "^6.12.3",
+    "ws": "^8.20.0"
   }
 }

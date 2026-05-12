@@ -9,4 +9,7 @@ const auditController = require('../controllers/auditController');
  */
 router.post('/', auditController.runAudit);
 
+// GET /api/audit/:id - Fetch a public audit (masked)
+router.get('/:id', auditController.getPublicAudit);
+
 module.exports = router;
