@@ -93,19 +93,18 @@ Rules:
     
     calculatedResults.strategic_summary = executiveSummary;
 
-    // 4. Persistence (using pg)
-    let auditId = null;
+    // 4. Persistence & ID Generation
+    const crypto = require('crypto');
+    let auditId = crypto.randomUUID();
+
     if (pool) {
       try {
         await createAuditTables();
 
-        const auditInsert = await pool.query(`
-          INSERT INTO audits (email, total_monthly_spend, total_monthly_savings, strategic_summary)
-          VALUES ($1, $2, $3, $4)
-          RETURNING id;
-        `, [email, calculatedResults.total_current_monthly_spend, calculatedResults.total_monthly_savings, executiveSummary]);
-
-        auditId = auditInsert.rows[0].id;
+        await pool.query(`
+          INSERT INTO audits (id, email, total_monthly_spend, total_monthly_savings, strategic_summary)
+          VALUES ($1, $2, $3, $4, $5);
+        `, [auditId, email, calculatedResults.total_current_monthly_spend, calculatedResults.total_monthly_savings, executiveSummary]);
 
         for (const tool of calculatedResults.per_tool_breakdown) {
           await pool.query(`
@@ -124,6 +123,7 @@ Rules:
         console.log('Audit saved with ID:', auditId);
       } catch (dbErr) {
         console.error('Audit Persistence Error:', dbErr);
+        // We still have the generated auditId, though it won't be in the DB
       }
     }
 
